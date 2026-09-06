@@ -1,4 +1,4 @@
-package core
+package cms
 
 import (
 	"time"
@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type ContentDTO struct {
+type PageDTO struct {
 	ID                uuid.UUID  `json:"id"`
 	Name              string     `json:"name"`
 	Slug              string     `json:"slug"`
@@ -22,4 +22,5 @@ type ContentDTO struct {
 	LatestUpdatedOn   time.Time  `json:"latest_updated_on"`
 	LatestUpdatedByID uuid.UUID  `json:"latest_updated_by_id"`
 	LatestUpdatedByName string   `json:"latest_updated_by_name,omitempty"`
+	Body              string     `json:"body"`
 }

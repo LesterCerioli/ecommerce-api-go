@@ -1,10 +1,9 @@
-package core
+package pricing
 
 import "github.com/google/uuid"
 
-type CustomerGroupUserDTO struct {
-	UserID          uuid.UUID `json:"user_id"`
-	UserName        string    `json:"user_name,omitempty"`
+type CartRuleCustomerGroupDTO struct {
+	CartRuleID      uuid.UUID `json:"cart_rule_id"`
 	CustomerGroupID uuid.UUID `json:"customer_group_id"`
 	CustomerGroupName string  `json:"customer_group_name,omitempty"`
 }
