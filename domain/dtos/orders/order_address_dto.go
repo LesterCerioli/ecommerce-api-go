@@ -1,8 +1,8 @@
-package core
+package orders
 
 import "github.com/google/uuid"
 
-type AddressDTO struct {
+type OrderAddressDTO struct {
 	ID                uuid.UUID  `json:"id"`
 	ContactName       string     `json:"contact_name"`
 	Phone             string     `json:"phone"`
@@ -11,9 +11,6 @@ type AddressDTO struct {
 	City              string     `json:"city"`
 	ZipCode           string     `json:"zip_code"`
 	DistrictID        *uuid.UUID `json:"district_id"`
-	DistrictName      string     `json:"district_name,omitempty"`
 	StateOrProvinceID uuid.UUID  `json:"state_or_province_id"`
-	StateOrProvinceName string   `json:"state_or_province_name,omitempty"`
 	CountryID         string     `json:"country_id"`
-	CountryName       string     `json:"country_name,omitempty"`
 }

@@ -1,4 +1,4 @@
-package core
+package news
 
 import (
 	"time"
@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type ContentDTO struct {
+type NewsItemDTO struct {
 	ID                uuid.UUID  `json:"id"`
 	Name              string     `json:"name"`
 	Slug              string     `json:"slug"`
@@ -22,4 +22,7 @@ type ContentDTO struct {
 	LatestUpdatedOn   time.Time  `json:"latest_updated_on"`
 	LatestUpdatedByID uuid.UUID  `json:"latest_updated_by_id"`
 	LatestUpdatedByName string   `json:"latest_updated_by_name,omitempty"`
+	ShortContent      string     `json:"short_content"`
+	FullContent       string     `json:"full_content"`
+	ThumbnailImageID  *uuid.UUID `json:"thumbnail_image_id"`
 }
