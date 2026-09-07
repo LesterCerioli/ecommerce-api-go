@@ -1,208 +1,164 @@
 package services
 
 import (
-	"crypto/ed25519"
-	"crypto/x509"
+	"context"
+	"crypto/hmac"
 	"database/sql"
-	"encoding/pem"
 	"errors"
-	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/joho/godotenv"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
 
-type Ed25519Claims struct {
-	ClientID string `json:"client_id"`
-	jwt.RegisteredClaims
+const TokenTTLSeconds = 120
+
+type AuthService struct {
+	db           *sql.DB
+	clientID     string
+	clientSecret string
+	privateKey   []byte
+	publicKey    []byte
 }
 
-type AuthTokenService struct {
-	db                *sql.DB
-	privateKey        ed25519.PrivateKey
-	publicKey         ed25519.PublicKey
-	clientCredentials map[string]string
-}
-
-func NewAuthTokenService(db *sql.DB) (*AuthTokenService, error) {
-	_ = godotenv.Load()
-
-	privateKeyPEM := os.Getenv("PRIVATE_KEY_VALUE")
-	if privateKeyPEM == "" {
-		return nil, errors.New("PRIVATE_KEY_VALUE must be set in environment")
-	}
-
-	publicKeyPEM := os.Getenv("PUBLIC_KEY_VALUE")
-	if publicKeyPEM == "" {
-		return nil, errors.New("PUBLIC_KEY_VALUE must be set in environment")
-	}
-
-	privateKey, err := parseEd25519PrivateKey(privateKeyPEM)
+func NewAuthService(dsn string) (*AuthService, error) {
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
+		return nil, err
 	}
 
-	publicKey, err := parseEd25519PublicKey(publicKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse public key: %w", err)
-	}
+	privateKey := []byte(os.Getenv("PRIVATE_KEY_VALUE"))
+	publicKey := []byte(os.Getenv("PUBLIC_KEY_VALUE"))
 
-	clientID := os.Getenv("CLIENT_ID")
-	secret := os.Getenv("CLIENT_SECRET")
-
-	if clientID == "" || secret == "" {
-		return nil, errors.New("CLIENT_ID and CLIENT_SECRET must be set in environment")
-	}
-
-	clientCredentials := map[string]string{
-		clientID: secret,
-	}
-
-	return &AuthTokenService{
-		db:                db,
-		privateKey:        privateKey,
-		publicKey:         publicKey,
-		clientCredentials: clientCredentials,
+	return &AuthService{
+		db:           db,
+		clientID:     os.Getenv("CLIENT_ID"),
+		clientSecret: os.Getenv("CLIENT_SECRET"),
+		privateKey:   privateKey,
+		publicKey:    publicKey,
 	}, nil
 }
 
-func parseEd25519PrivateKey(pemStr string) (ed25519.PrivateKey, error) {
-	pemStr = strings.ReplaceAll(pemStr, "\\n", "\n")
-
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
-		return nil, errors.New("failed to decode PEM block for private key")
-	}
-
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
-	}
-
-	edKey, ok := key.(ed25519.PrivateKey)
-	if !ok {
-		return nil, errors.New("key is not an Ed25519 private key")
-	}
-
-	return edKey, nil
+func (a *AuthService) EnsureTable(ctx context.Context) error {
+	ddl := `
+    CREATE TABLE IF NOT EXISTS public.auth_tokens (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        client_id   VARCHAR(64) NOT NULL,
+        jwt_token   TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at  TIMESTAMPTZ NOT NULL
+    );`
+	_, err := a.db.ExecContext(ctx, ddl)
+	return err
 }
 
-func parseEd25519PublicKey(pemStr string) (ed25519.PublicKey, error) {
-	pemStr = strings.ReplaceAll(pemStr, "\\n", "\n")
-
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
-		return nil, errors.New("failed to decode PEM block for public key")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse PKIX public key: %w", err)
-	}
-
-	edKey, ok := pub.(ed25519.PublicKey)
-	if !ok {
-		return nil, errors.New("key is not an Ed25519 public key")
-	}
-
-	return edKey, nil
+func (a *AuthService) authenticateCredentials(clientID, clientSecret string) bool {
+	return hmac.Equal([]byte(clientID), []byte(a.clientID)) &&
+		hmac.Equal([]byte(clientSecret), []byte(a.clientSecret))
 }
 
-func (s *AuthTokenService) GenerateToken(clientID string, clientSecret string) (string, string, string, error) {
-	fmt.Printf("[INFO] Iniciando geração de token Ed25519 para client_id=%s\n", clientID)
-
-	storedSecret, ok := s.clientCredentials[clientID]
-	if !ok {
-		fmt.Printf("[WARN] client_id não encontrado: %s\n", clientID)
-		return "", "", "", errors.New("invalid client_id or secret")
-	}
-	if storedSecret != clientSecret {
-		fmt.Printf("[WARN] Segredo inválido para client_id=%s\n", clientID)
-		return "", "", "", errors.New("invalid client_id or secret")
+func (a *AuthService) createJWT(clientID string, tokenID uuid.UUID) (string, error) {
+	now := time.Now().UTC()
+	claims := jwt.MapClaims{
+		"sub":  clientID,
+		"iat":  now.Unix(),
+		"exp":  now.Add(time.Second * TokenTTLSeconds).Unix(),
+		"iss":  "auth_service",
+		"type": "m2m",
+		"jti":  tokenID.String(),
 	}
 
-	expiration := time.Now().UTC().Add(2 * time.Hour)
-	fmt.Printf("[DEBUG] Expiração definida para: %s\n", expiration.Format(time.RFC3339))
-
-	claims := Ed25519Claims{
-		ClientID: clientID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(expiration),
-			IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
-			NotBefore: jwt.NewNumericDate(time.Now().UTC()),
-			Issuer:    "ecommerce-api-go",
-			Subject:   clientID,
-		},
-	}
-
+	// Ed25519 (EdDSA) assinatura
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
-
-	tokenString, err := token.SignedString(s.privateKey)
-	if err != nil {
-		fmt.Printf("[ERROR] Falha ao assinar token JWT com Ed25519: %v\n", err)
-		return "", "", "", fmt.Errorf("error signing token: %w", err)
-	}
-
-	fmt.Printf("[INFO] Token JWT Ed25519 gerado com sucesso para client_id=%s\n", clientID)
-
-	_, err = s.db.Exec(
-		`INSERT INTO public.auth_tokens (client_id, jwt_token, expires_at) VALUES ($1, $2, $3)`,
-		clientID,
-		tokenString,
-		expiration.UTC(),
-	)
-	if err != nil {
-		fmt.Printf("[ERROR] Falha ao salvar token no banco de dados: %v\n", err)
-		return "", "", "", fmt.Errorf("error saving to database: %w", err)
-	}
-
-	fmt.Printf("[INFO] Token salvo no banco com sucesso para client_id=%s\n", clientID)
-
-	return tokenString, clientID, clientSecret, nil
+	return token.SignedString(a.privateKey)
 }
 
-func (s *AuthTokenService) ValidateToken(tokenString string) error {
-	var exists bool
-	err := s.db.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM public.auth_tokens WHERE jwt_token = $1 AND expires_at > NOW())`,
-		tokenString,
-	).Scan(&exists)
-	if err != nil || !exists {
-		return errors.New("invalid token or expired")
-	}
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if token.Method.Alg() != "EdDSA" {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.publicKey, nil
+func (a *AuthService) verifyJWT(tokenStr string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return a.publicKey, nil
 	})
 	if err != nil {
-		return fmt.Errorf("invalid token: %w", err)
+		return nil, err
 	}
-
-	if !token.Valid {
-		return errors.New("invalid token")
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims, nil
 	}
-
-	return nil
+	return nil, errors.New("invalid token")
 }
 
-func (s *AuthTokenService) GetValidToken(clientID string) (string, error) {
-	var token string
-	err := s.db.QueryRow(
-		`SELECT jwt_token FROM public.auth_tokens WHERE client_id = $1 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
-		clientID,
-	).Scan(&token)
+func (a *AuthService) GenerateToken(ctx context.Context, clientID, clientSecret string) (map[string]interface{}, error) {
+	if !a.authenticateCredentials(clientID, clientSecret) {
+		return nil, errors.New("invalid client_id or client_secret")
+	}
 
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Second * TokenTTLSeconds)
+	tokenID := uuid.New()
+
+	jwtToken, err := a.createJWT(clientID, tokenID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return token, nil
+
+	_, err = a.db.ExecContext(ctx,
+		`INSERT INTO public.auth_tokens (id, client_id, jwt_token, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+		tokenID, clientID, jwtToken, now, expiresAt)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"access_token": jwtToken,
+		"token_type":   "Bearer",
+		"expires_in":   TokenTTLSeconds,
+		"expires_at":   expiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+func (a *AuthService) ValidateToken(ctx context.Context, jwtToken string) (map[string]interface{}, error) {
+	claims, err := a.verifyJWT(jwtToken)
+	if err != nil {
+		return nil, err
+	}
+
+	clientID := claims["sub"].(string)
+
+	row := a.db.QueryRowContext(ctx,
+		`SELECT id, client_id, expires_at
+         FROM public.auth_tokens
+         WHERE jwt_token = $1 AND client_id = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+		jwtToken, clientID)
+
+	var id uuid.UUID
+	var dbClientID string
+	var expiresAt time.Time
+	if err := row.Scan(&id, &dbClientID, &expiresAt); err != nil {
+		return nil, errors.New("token not found in database")
+	}
+
+	if expiresAt.Before(time.Now().UTC()) {
+		return nil, errors.New("token has expired in database")
+	}
+
+	return map[string]interface{}{
+		"valid":      true,
+		"client_id":  dbClientID,
+		"token_id":   id.String(),
+		"expires_at": expiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+func (a *AuthService) RevokeToken(ctx context.Context, jwtToken string) (bool, error) {
+	res, err := a.db.ExecContext(ctx,
+		`DELETE FROM public.auth_tokens WHERE jwt_token = $1`, jwtToken)
+	if err != nil {
+		return false, err
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0, nil
 }
